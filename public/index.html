@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kenya Spatial Land Portal</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+        
+        /* Sidebar Styling */
+        #sidebar { width: 350px; background: #1a1a1a; color: white; padding: 20px; box-shadow: 2px 0 10px rgba(0,0,0,0.5); z-index: 1000; overflow-y: auto; }
+        #map { flex-grow: 1; height: 100%; }
+
+        h2 { color: #27ae60; font-size: 1.2rem; border-bottom: 2px solid #27ae60; padding-bottom: 10px; }
+        .control-group { margin-bottom: 20px; }
+        label { display: block; font-size: 0.8rem; color: #aaa; margin-bottom: 5px; }
+        input { width: 100%; padding: 10px; background: #333; border: 1px solid #444; color: white; border-radius: 4px; box-sizing: border-box; }
+        
+        /* Button Styling */
+        .btn { width: 100%; padding: 12px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.3s; margin-top: 10px; }
+        .btn-buffer { background: #2980b9; color: white; }
+        .btn-buffer:hover { background: #3498db; }
+        .btn-active { background: #e74c3c !important; }
+
+        /* Analysis Results Styling */
+        #analysisResults { margin-top: 25px; }
+        .result-card { background: #2c3e50; padding: 12px; border-radius: 6px; margin-bottom: 10px; border-left: 4px solid #27ae60; }
+        .result-card strong { display: block; color: #ecf0f1; font-size: 0.9rem; }
+        .result-card small { color: #bdc3c7; font-size: 0.75rem; }
+
+        /* Legend Styling */
+        .legend {
+            margin-top: 25px;
+            padding: 12px;
+            background: #2c3e50;
+            border-radius: 6px;
+            font-size: 0.8rem;
+        }
+        .legend h4 {
+            margin: 0 0 10px 0;
+            color: #ecf0f1;
+            font-size: 0.9rem;
+            border-bottom: 1px solid #444;
+            padding-bottom: 5px;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .legend-color {
+            width: 20px;
+            height: 20px;
+            margin-right: 10px;
+            border-radius: 3px;
+            border: 1px solid #444;
+        }
+        .legend-label {
+            color: #bdc3c7;
+        }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <h2>LAND PORTAL</h2>
+    
+    <div class="control-group">
+        <label>SEARCH BY PLOT ID</label>
+        <input type="text" id="searchBox" placeholder="e.g. 123/45..." onkeyup="filterParcels()">
+    </div>
+
+    <button id="bufferBtn" class="btn btn-buffer" onclick="toggleBufferMode()">PROXIMITY ANALYZER (2KM)</button>
+    <p id="hint" style="font-size: 0.75rem; color: #888; text-align: center; margin-top: 8px;"></p>
+
+    <div id="analysisResults">
+        <p style="color:#666; font-style:italic;">Click "Proximity Analyzer" then click any point on the map to see nearby amenities.</p>
+    </div>
+    
+    <!-- Legend Section -->
+    <div class="legend">
+        <h4>PLOT STATUS LEGEND</h4>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #2ecc71;"></div>
+            <span class="legend-label">Available Plot</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #e74c3c;"></div>
+            <span class="legend-label">sold Plot</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background-color: #3498db;"></div>
+            <span class="legend-label">Buffer Zone (2km)</span>
+        </div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<script>
+    // 1. Initialize Map
+    const map = L.map('map').setView([-1.286, 36.817], 13); // Centered on Nairobi
+
+    // 2. Basemaps
+    const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { attribution: '© OSM' });
+    const googleSat = L.tileLayer('http://{s}.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+        maxZoom: 20, subdomains:['mt0','mt1','mt2','mt3']
+    }).addTo(map);
+
+    // 3. Custom Icons
+    const icons = {
+        school: L.icon({ iconUrl: 'https://cdn-icons-png.flaticon.com/512/167/167707.png', iconSize: [15, 15] }),
+        health: L.icon({ iconUrl: 'https://cdn-icons-png.flaticon.com/512/684/684102.png', iconSize: [15, 15] }),
+        town: L.icon({ iconUrl: 'https://cdn-icons-png.flaticon.com/512/1218/1218350.png', iconSize: [15, 15] })
+    };
+
+    // 4. Layers
+    let parcelData; // To store full GeoJSON for filtering
+    const parcelLayer = L.geoJSON(null, {
+        style: (f) => ({
+            fillColor: f.properties.status === 'AVAILABLE' ? '#2ecc71' : '#e74c3c',
+            weight: 1, color: 'white', fillOpacity: 0.5
+        }),
+        onEachFeature: (f, l) => {
+            // Get the center of the feature for Google Maps directions
+            const bounds = l.getBounds();
+            const center = bounds.getCenter();
+            const googleUrl = `https://www.google.com/maps/dir/?api=1&destination=${center.lat},${center.lng}`;
+            
+            // Enhanced popup with all attributes
+            const popupContent = `
+                <div style="min-width: 250px;">
+                    <h4 style="margin: 0 0 10px 0; color: ${f.properties.status === 'AVAILABLE' ? '#2ecc71' : '#e74c3c'}">
+                        📍 Plot ${f.properties.id}
+                    </h4>
+                    <table style="width: 100%; font-size: 0.85rem;">
+                        <tr>
+                            <td><strong>Status:</strong></td>
+                            <td style="color: ${f.properties.status === 'AVAILABLE' ? '#2ecc71' : '#e74c3c'}">${f.properties.status}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Area:</strong></td>
+                            <td>${f.properties.area || 'N/A'} Ha</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Ward:</strong></td>
+                            <td>${f.properties.ward || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td><strong>County:</strong></td>
+                            <td>${f.properties.county || 'N/A'}</td>
+                        </tr>
+                        <tr>
+                            <td colspan="2" style="padding-top: 10px;">
+                                <a href="${googleUrl}" target="_blank" 
+                                   style="display: block; text-align: center; padding: 8px; 
+                                          background: #4285F4; color: white; text-decoration: none; 
+                                          border-radius: 4px; font-weight: bold; font-size: 0.8rem;">
+                                    🗺️ GET GOOGLE DIRECTIONS
+                                </a>
+                            </td>
+                        </tr>
+                    </table>
+                </div>
+            `;
+            
+            l.bindPopup(popupContent);
+            
+            // Add click event to zoom to parcel
+            l.on('click', function() {
+                map.fitBounds(l.getBounds());
+            });
+        }
+    }).addTo(map);
+
+    const schoolLayer = L.layerGroup().addTo(map);
+    const healthLayer = L.layerGroup().addTo(map);
+    const townLayer = L.layerGroup().addTo(map);
+
+    // 5. Layer Control
+    L.control.layers({ "Satellite": googleSat, "Street": osm }, {
+        "🏠 Parcels": parcelLayer,
+        "🏫 Schools": schoolLayer,
+        "🏥 Health Centers": healthLayer,
+        "🏙️ Towns": townLayer
+    }).addTo(map);
+
+    // 6. Data Fetching
+    function loadParcels() {
+        fetch('/api/parcels').then(r => r.json()).then(data => {
+            parcelData = data;
+            parcelLayer.addData(data);
+            map.fitBounds(parcelLayer.getBounds());
+        });
+    }
+
+    function loadAmenity(type, layer, icon) {
+        fetch(`/api/amenities/${type}`).then(r => r.json()).then(data => {
+            L.geoJSON(data, {
+                pointToLayer: (f, latlng) => L.marker(latlng, { icon: icon }),
+                onEachFeature: (f, l) => l.bindPopup(`<b>${f.properties.name}</b><br>${f.properties.subtype || ''}`)
+            }).addTo(layer);
+        });
+    }
+
+    loadParcels();
+    loadAmenity('schools', schoolLayer, icons.school);
+    loadAmenity('health_centers', healthLayer, icons.health);
+    loadAmenity('town_centres', townLayer, icons.town);
+
+    // 7. Search/Filter Logic
+    function filterParcels() {
+        const val = document.getElementById('searchBox').value.toLowerCase();
+        parcelLayer.clearLayers();
+        const filtered = {
+            ...parcelData,
+            features: parcelData.features.filter(f => f.properties.id.toString().toLowerCase().includes(val))
+        };
+        parcelLayer.addData(filtered);
+    }
+
+    // 8. Proximity Buffer Tool
+    let bufferActive = false;
+    let tempCircle = null;
+
+    function toggleBufferMode() {
+        bufferActive = !bufferActive;
+        const btn = document.getElementById('bufferBtn');
+        const hint = document.getElementById('hint');
+        
+        if(bufferActive) {
+            btn.classList.add('btn-active');
+            btn.innerText = "CANCEL ANALYSIS";
+            hint.innerText = "Click anywhere on the map...";
+        } else {
+            btn.classList.remove('btn-active');
+            btn.innerText = "PROXIMITY ANALYZER (2KM)";
+            hint.innerText = "";
+            if(tempCircle) map.removeLayer(tempCircle);
+        }
+    }
+
+    map.on('click', async (e) => {
+        if (!bufferActive) return;
+
+        if (tempCircle) map.removeLayer(tempCircle);
+        tempCircle = L.circle(e.latlng, { radius: 2000, color: '#3498db', fillOpacity: 0.15 }).addTo(map);
+
+        const res = await fetch(`/api/proximity_analysis?lat=${e.latlng.lat}&lng=${e.latlng.lng}`);
+        const data = await res.json();
+
+        let html = `<h4>Results (2km Radius)</h4>`;
+        if (data.length === 0) html += `<p>No features found.</p>`;
+
+        data.forEach(item => {
+            html += `
+                <div class="result-card">
+                    <strong>${item.name}</strong>
+                    <small>${item.type} — ${Math.round(item.distance)}m away</small>
+                </div>`;
+        });
+        document.getElementById('analysisResults').innerHTML = html;
+    });
+
+    // Helper function for zooming to specific parcels
+    function zoomToParcel(plotId) {
+        parcelLayer.eachLayer(function(layer) {
+            if (layer.feature && layer.feature.properties.id.toString() === plotId) {
+                map.fitBounds(layer.getBounds());
+                layer.openPopup();
+                // Highlight the parcel briefly
+                layer.setStyle({ weight: 3, color: '#f1c40f' });
+                setTimeout(() => {
+                    layer.setStyle({ weight: 1, color: 'white' });
+                }, 2000);
+            }
+        });
+    }
+</script>
+
+</body>
+</html>
